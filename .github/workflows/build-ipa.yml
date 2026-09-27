@@ -19,7 +19,19 @@ jobs:
         with:
           xcode-version: latest-stable
 
-      - name: Archive (unsigned, simulator-skip)
+      - name: Sanity-check project file
+        run: |
+          set -eo pipefail
+          echo "=== synchronized group path (must be '.') ==="
+          grep -n -A3 "PBXFileSystemSynchronizedRootGroup" MaxLite.xcodeproj/project.pbxproj || true
+          echo "=== swift files visible to the build ==="
+          find . -name "*.swift" -not -path "./build/*" | wc -l
+          test "$(find . -name '*.swift' -not -path './build/*' | wc -l)" -gt 20 \
+            || { echo "::error::Swift sources not found in repo"; exit 1; }
+          grep -q 'path = \.;' MaxLite.xcodeproj/project.pbxproj \
+            || { echo "::error::pbxproj still points at MaxLite/ subfolder"; exit 1; }
+
+      - name: Archive (unsigned)
         run: |
           set -eo pipefail
           xcodebuild \
@@ -27,23 +39,57 @@ jobs:
             -scheme MaxLite \
             -configuration Release \
             -sdk iphoneos \
-            -allowProvisioningUpdates \
+            -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             DEVELOPMENT_TEAM="" \
-            -derivedDataPath build \
             archive \
-            -archivePath build/MaxLite.xcarchive
+            -archivePath build/MaxLite.xcarchive \
+            2>&1 | tee build.log
+          # xcodebuild может вернуть 0 при ошибках компиляции в некоторых
+          # версиях — проверяем лог руками.
+          if grep -qE "^.*error: " build.log; then
+            echo "::error::xcodebuild reported errors"
+            grep -E "error: " build.log | head -30
+            exit 1
+          fi
+
+      - name: Verify archived app
+        run: |
+          set -eo pipefail
+          APP="build/MaxLite.xcarchive/Products/Applications/MaxLite.app"
+          test -d "$APP" || { echo "::error::MaxLite.app missing from archive"; exit 1; }
+          echo "=== app contents (top level) ==="
+          ls -la "$APP"
+          echo "=== executable ==="
+          ls -la "$APP/MaxLite" || { echo "::error::no MaxLite executable"; exit 1; }
+          # Пустой бандл весит килобайты; настоящий — десятки мегабайт.
+          SIZE=$(du -sm "$APP" | cut -f1)
+          echo "app size: ${SIZE} MB"
+          test "$SIZE" -ge 1 || { echo "::error::app bundle is empty (${SIZE} MB)"; exit 1; }
+          plutil -p "$APP/Info.plist" | head -20
 
       - name: Package unsigned IPA
         run: |
           set -eo pipefail
-          # Распаковываем .app из архива и упаковываем в Payload/MaxLite.app
+          rm -rf Payload MaxLite-unsigned.ipa
           mkdir -p Payload
           cp -R "build/MaxLite.xcarchive/Products/Applications/MaxLite.app" Payload/
-          rm -rf Payload/MaxLite.app/_CodeSignature 2>/dev/null || true
+          rm -rf Payload/MaxLite.app/_CodeSignature
           zip -qry MaxLite-unsigned.ipa Payload
+          ls -la MaxLite-unsigned.ipa
+          SIZE=$(stat -f%z MaxLite-unsigned.ipa)
+          test "$SIZE" -gt 1000000 \
+            || { echo "::error::IPA is only ${SIZE} bytes — bundle was empty"; exit 1; }
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
