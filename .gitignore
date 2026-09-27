@@ -1,0 +1,18 @@
+# Xcode
+build/
+*.xcodeproj/**/xcuserdata/
+*.xcworkspace/**/xcuserdata/
+DerivedData/
+*.xcarchive
+
+# macOS
+.DS_Store
+._*
+
+# Swift
+*.swiftpm
+.swiftpm/
+
+# Artifacts
+*.ipa
+Payload/
